@@ -296,6 +296,10 @@ lang_interp_feat <- sapply(seq(0, 1, length.out = 100),
 image(lang_interp_feat)
 
 
+######## Estimate reconstruction error with only active dimensions ########
+zeros <- matrix(0, nrow = nrow(latent_means), ncol = ncol(latent_means))
+
+
 ######## Setup VAE stage 2 ##############
 ## It looks like we don't need this as the 14 active dimensions of
 ## the first stage VAE look very Gaussian and well behaved?
