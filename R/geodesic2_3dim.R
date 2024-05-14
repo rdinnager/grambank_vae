@@ -220,6 +220,8 @@ nn <- knn.dist(centroids_df %>%
 rho <- mean(nn)
 rho <- torch_tensor(rho, device = "cuda")
 
+write_rds(as.numeric(rho$cpu()), "data/estimated_rho_3dim.rds")
+
 get_metric_tensor <- function(z, centroids, vars, lambda = 1e-2, rho) {
   mh <- torch_exp(-(mahalanobis_squared[[1]](z, centroids, vars) / (rho^2)))
   ## really relying on broadcasting correctly here! Hope I got it right!
@@ -270,8 +272,13 @@ mani_evo_mod <- nn_module("mani_evo",
                               as.matrix()
                             diag(centroid_dists) <- 999999999999999
                             mins <- apply(centroid_dists, 1, min)
+                            maxs <- apply(centroid_dists, 1, max)
                             rho <- max(mins)
-                            self$rho <- torch_tensor(rho, device = device)
+                            target_rho <- rho / 3
+                            start_rho <- rho * 3
+                            self$target_rho <- torch_tensor(target_rho, device = device)
+                            self$start_rho <- torch_tensor(start_rho, device = device)
+                            self$rho <- torch_tensor(start_rho, device = device)
 
                             self$a <- nn_parameter(torch_randn(n_rates, n_dim) * 0.001)
                             self$b <- nn_parameter(torch_randn(n_rates, n_dim) * 0.001)
@@ -314,6 +321,8 @@ mod <- mani_evo_mod(n_rates = nrow(gb_init_rates), n_dim = 3,
                     device = "cuda")
 mod <- mod$cuda()
 
+write_rds(as.numeric(mod$target_rho$cpu()), "data/estimated_rho_3dim_rho_schedule.rds")
+
 #tt <- mod(test)
 
 ## tests
@@ -329,9 +338,20 @@ mod <- mod$cuda()
 #   print(i)
 # }
 
-n_epoch <- 5000
-lr <- 0.005
-save_every <- 10
+cosine_schedule <- function(t, start=0, end=1, tau=1, clip_min=1e-9) {
+  # A gamma function based on cosine function.
+  v_start <- cos(start * pi / 2) ^ (2 * tau)
+  v_end <- cos(end * pi / 2) ^ (2 * tau)
+  output <- cos((t * (end - start) + start) * pi / 2) ^ (2 * tau)
+  output <- (v_end - output) / (v_end - v_start)
+  output[output < clip_min] <- clip_min
+  output[output > 1.0] <- 1.0
+  output
+}
+
+n_epoch <- 10000
+lr <- 0.02
+save_every <- 50
 
 optim1 <- optim_adam(mod$parameters, lr = lr)
 scheduler <- lr_one_cycle(optim1, max_lr = lr,
@@ -396,6 +416,7 @@ for(epoch in 1:n_epoch) {
       "    loss: ", as.numeric(total_loss$cpu()),
       "    tip recon loss: ", as.numeric(total_recon_loss$cpu()),
       "    tree distance loss: ", as.numeric(total_dist_loss$cpu()),
+      "    rho: ", as.numeric(mod$rho$cpu()),
 #      "    segment evenness loss: ", as.numeric(total_evenness_loss$cpu()),
       "\n")
 
@@ -423,13 +444,19 @@ for(epoch in 1:n_epoch) {
 
   optim1$step()
 
+  ## update rho
+  prop_epoch <- epoch / n_epoch
+  noise <- cosine_schedule(prop_epoch, 0.1, 1, 6)
+  new_rho <- mod$target_rho + (mod$start_rho - mod$target_rho) * noise
+  mod$rho <- new_rho
+
   # scale(loss)$backward()
   # scaler$step(optim1)
   # scaler$update()
 }
 
 options(torch.serialization_version = 2)
-torch_save(mod, "data/mani_evo_mod_run_new_full_param_3dim_1.to")
+torch_save(mod, "data/mani_evo_mod_run_new_full_param_3dim_rho_scedule.to")
 
 gb_test_dl <- dataloader(gb_ds, 100, shuffle = FALSE, drop_last = FALSE)
 test_dat <- list()
@@ -491,7 +518,7 @@ lang_dat <- read_csv("data/cldf/languages.csv")
 z_tree_df <- z_tree_df %>%
   left_join(lang_dat, by = c("edge" = "Glottocode"))
 
-write_rds(z_tree_df, "data/gb_vae_aces_3dim.rds")
+write_rds(z_tree_df, "data/gb_vae_aces_3dim_noise_schedule.rds")
 
 rgl::open3d()
 for(i in 1:nrow(z_tree_df)) {
